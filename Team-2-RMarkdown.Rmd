@@ -1,0 +1,286 @@
+---
+title: "Team 2 R File"
+output: html_document
+author: Josh Williams and Brandon Hulse
+date: "2024-11-11"
+---
+
+## Overview of Data Sets and Methods
+
+Data sets we used: 
+
+1. ARCOS data set: A data set that captures transactions of controlled substances 
+
+    a. Data set covers a time frame of 2006-2019. This is the longest time frame we could get. 
+    b. Eastern Tennessee was chosen because it intersects with the Appalachian mountains region, which was the most critically affected region in the United States for the opioid epedemic. It also includes both rural and urban centers, meaning that patterns obseved in this region could reasonably be comparable to other affected regions. Additionally, this region saw some policy enactments during the selected time frame that could be analyzed. The counties we chose in Eastern TN were as follows: Johnson, Carter, Sullivan, Washington, Unicoi, Greene, Hawkins, Hancock, Grainger, Hamblen, Jefferson, Cocke, Sevier, Claiborne, Union, Knox, Blount, Hamilton, Bradley, Polk, McMinn, Loudon, Monroe, Morgan, Rhea, Roane, Scott, Campbell, Anderson, Meigs.
+    c. Filtered for retail pharmacy, practitioner, chain pharmacy, and hospital/clinic in types of buyers because they comprise the vast majority of transactions; and are more likely to produce targeted data on opioid abuse. Vet clinics, chemical manufacturers, analytical labs, etc. are examples of buyer types filtered out, as these buyers likely do not offer insight into the opioid epidemic. 
+    d. We chose oxycodone as the focus substance. Oxycodone was one of the first substances widely seen during the early years of the opioid epidemic (especially branded names like Percocet and Oxycontin). Moreover, because oxycodone was widely used as a prescription drug, it has comprehensive, complete, and well-reported data (which may not be the case for a drug common in the black market like fentanyl)
+
+2. US Census Data/NIH HD Pulse 
+    a. US census data was used to get population numbers and land area numbers for the counties selected. This allowed us calculate metrics like population density and incorporate them into our analysis in Tableau.  
+    b. US census data also contains lots of other data relevant to health equity that could be used in further analysis
+    c. NIH HD Pulse data Contained median family income data for the counties we analyzed. 
+    d. We used excel VLOOKUP to match county fields between data sets to combine them into one data set that could be loaded into tableau/R. We preferred this more manual method over as it was much easier to do. 
+
+At a high level, our analysis of oxycodone use in Eastern Tennessee incorporates the following: 
+
+  1. Interrupted time series for oxycodone purchases over time 
+      a. Demonstrated delayed policy impact for non-hospital buyer types and rural counties 
+      b. Demonstrated how 2012 policy dramatically changed the rate at which opioids were purchased/prescribed \
+  
+  2. Quantity of Oxycodone purchased over time by buyer type, by county type (rural vs urban)
+      a. Demonstrated delayed policy impact for non-hospital buyer types and rural counties 
+  
+  3. Evaluated Error and Bias 
+  
+  4. Geospatial Analysis 
+
+## Oxycodone Data Setup and Cleaning
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+# load in packages
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(lmtest)
+```
+
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+# read in the eastern TN oxycodone file
+# the file is large, so it may take a few minutes
+oxycodone <- read.csv("G:/Shared drives/Health Equity/data/easttn_oxycodone.csv")
+```
+
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+# view columns of data
+colnames(oxycodone)
+
+# output total number of columns
+length(colnames(oxycodone))
+```
+
+
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+# view number of null observations by column
+nulls <- colSums(is.na(oxycodone))  # count null values in each column
+nulls <- nulls[nulls > 0]              # only return columns with at least one null value
+nulls
+
+# view number of empty observations by column
+sum_empty <- function(column) {  # Function to count empty strings in each column
+  sum(column == "")
+}
+empty_observations_by_col <- sapply(oxycodone, sum_empty) # apply sum_empty to oxycodone data frame
+empty_observations_by_col
+```
+
+
+Looking at the column names in the data, as well as columns with null and empty data, we concluded that many of the 42 total columns in this data will not be useful to us. Thus, to make our data set nicer, we'll select only the columns that seem relevant for our purposes.
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+# Remove unneeded columns
+oxycodone <- oxycodone %>%
+  select(transaction_code, transaction_id, transaction_date, drug_name, quantity, dos_str, 
+         buyer_bus_act, buyer_name, buyer_address1, buyer_address2, buyer_county, buyer_city, 
+         reporter_bus_act, reporter_name)
+```
+  a. Transaction information (date, id, etc.) seems relevant if we ever want it. 
+  b. Basic information about the drug seems relevant. `quantity` will be our main quantitative variable for evaluating the data. We would use `unit` as well, but it has too many empty rows to make it worthwhile (note: quantity - number of packages, weight, or volume being reported).
+  c. We are more interested in the buyer (understanding the characteristics of buyers in eastern TN, such as their location, type, etc.) vs. the reporter (often large pharmaceutical corporations). For that reason, we selected more variables related to the buyer than for the reporter. 
+  d. We chose not to select some columns, such as `order_form_no` and `strength` because these columns have a lot of null / empty observations. 
+
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+# view some data
+head(oxycodone)
+```
+
+From our EDA, we discovered that most transactions tend to have a `quantity` value of 1-6. However, there are some strong outliers, which we will demonstrate below: 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+transaction_quantities <- oxycodone %>% 
+  select(quantity, buyer_name) %>% 
+  group_by(quantity) %>%
+  summarize("number of transactions" = n()) %>%
+  arrange("number of transactions")
+
+# view most common quantity levels
+head(transaction_quantities)
+
+# view least common quantity levels
+transaction_quantities %>% filter(`number of transactions` == 1) %>% arrange(desc(quantity))
+```
+Evidently, there are some strong outliers in the `quantity` variable - most observations range from 1-6, yet some have quantity values over 30,0000. We can dig into this further by understanding which buyers were purchasing oxycodone at these extreme quantities:
+
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+# view the heaviest buyers
+oxycodone %>% 
+  filter(quantity > 30000) %>% 
+  select(buyer_name, buyer_city, buyer_bus_act, quantity) %>%
+  arrange(desc(quantity)) %>%
+  head(10)
+```
+As you can see, *most* observations with very high `quantity` levels are from the University of Tennessee's hospital in Knoxville, TN, which is [the 4th largest hospital in Tennessee](https://finance.yahoo.com/news/top-ten-largest-hospitals-tennessee-061537819.html). Thus, this result makes some sense; a large health system like this may want to purchase opioids in bulk for economic, operational, or other reasons. 
+
+What really sticks out about the table above is "Kingwood Rexall Pharmacy." This a singular retail pharmacy in Chattanooga purchased extremely high levels of oxycodone in two different transactions, 3x-6x more than the UT hospital did. Those two observations are stark outliers, with `quantity` levels so large they would skew the results of our interrupted time series. Therefore, while understanding what happened at Kingwood Rexall Pharmacy might be important for Tennessee health officials, for our purposes we will remove this buyer from the data.   
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+# Remove rexall pharmacy
+oxycodone <- oxycodone %>% filter(buyer_name != "KINGWOOD REXALL PHARMACY")
+```
+
+
+
+Finally, since our main analysis in R willbe to perform an interrupted time series, we will need to convert the 'transaction_date` column to a date object. 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+oxycodone$transaction_date <- as.Date(oxycodone$transaction_date, format = "%m/%d/%Y")
+```
+
+
+### Interrupted Time Series for Oxycodone in Eastern TN
+The Tennessee Prescription Safety Act (TN-PSA) of 2012 went into effect in May of 2012. For our interrupted time series, we are interested in determining how effectively this new policy contributed to a decline in total oxycodone use in Eastern Tennessee, particularly overprescriptions. Thus, the response variable of interest for our time series will be `quantity`. We hypothesize that the `quantity` variable would do a sufficient job of capturing the reduction / increase of oxycodone use. 
+
+Additionally, for this interrupted time series, we will group data by year and month. We prefer this aggregated format because it will allow us to understand the overall trends in oxycodone transactions in Eastern Tennessee due to the TN-PSA, something that may be harder to do when analyzing individual observations 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+# group the oxycodone data by year and month
+oxycodone_yearmonth <- oxycodone %>% 
+  mutate(year = format(transaction_date, "%Y"), # extract the year
+         month = format(transaction_date, "%m")) %>% # extract the month
+  group_by(year, month) %>% # group by year and month
+  summarize(quantity = sum(quantity))
+
+# view new data frame
+head(oxycodone_yearmonth, 3)
+```
+We can create a single time variable that represents the running total of months in the data, starting from January 2006. Creating this variable will help with implementing the policy intervention for our interrupted time series. 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+# create new time variable, representing the total months starting from January 2006
+oxycodone_yearmonth <- oxycodone_yearmonth %>%
+  mutate(time = (as.numeric(year)-2006)*12 + as.numeric(month)) # calculate new time variable
+ #  mutate(time = (year(transaction_date) - 2006) * 12 + month(transaction_date) - 1 ) 
+
+head(oxycodone_yearmonth)
+```
+The TN-PSA of 2012 went into effect in May of 2012. So, in order to create the dummy variable indicating whether an observation occurs before (=0) or after (=1) the policy intervention, we need to figure out the value of `time` associated with May 2012. 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+oxycodone_yearmonth %>% filter(year == "2012" & month == "05")
+```
+Thus, starting at `time = 77`, the policy intervention for our interrupted time series came into effect. Now that we know this information, we need to create two additional variables to create the interrupted time series. First, we can code a dummy variable named `treatment`, which represents whether an observation occurs before or after the intervention. Second, we can code a variable named `time_since`, which will represent how many months have passed after the intervention (if the observation is after the intervention).
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+oxycodone_yearmonth <- oxycodone_yearmonth %>%
+  mutate(treatment = ifelse(time < 77, 0, 1),  # code the dummy variable
+         time_since = ifelse(treatment == 1, time - 76, 0)) # before intervention has occurred P is equal to 0
+```
+
+At this point, we have all the required variables for an interrupted time series to study the impact of the TN-PSA of 2012 in Eastern Tennessee. 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+
+
+# fit the model
+its <- lm(quantity ~ time + treatment + time_since, data = oxycodone_yearmonth)
+summary(its)
+
+
+```
+Looking at the results of this model, we see that the interrupted time series appears to be statistically significant. The F statistic of 20.51 is much greater than 1, with a very small p-value of 2.453e-11. Additionally, all of our predictor variables have *** significance codes, indicating they are also statistically significant with very small p-values. 
+
+
+To visualize the effect of the policy, we can plot the regression slope before and after the intervention.
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+# calculate predicted values to plot
+pred_data <- oxycodone_yearmonth # want full data frame to predict on to give more flexibility when plotting
+pred_data$pred_values <- predict(its, newdata = oxycodone_yearmonth) # predict values of quantity with the model
+
+# turn treatment into a factor variable for nicer plotting
+pred_data$treatment <- factor(pred_data$treatment, levels = c(0, 1), labels = c("Before", "After"))
+```
+
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+# plot 
+pred_data %>% 
+  ggplot(aes(x = time, y = quantity)) +
+  geom_point(aes(color = treatment), alpha = 0.8) + # plot points, color before vs. after intervention
+  geom_line(aes(y = pred_values, color = treatment)) + # plot line, base line off predicted values 
+  geom_vline(xintercept = 77, linetype = "dashed", color = "#726565") +
+  labs(title = "Interrupted Time Series of the Tennesseee \nPrescription Safety Act of 2012", 
+       x = "Time (months, starting in Jan 2006)", 
+       y = "Quantity of Oxycodone \nPurchased in \nEastern Tennessee", 
+       color = "TN-PSA") +
+  scale_color_manual(values = c("black", "navy")) + 
+  theme(axis.title.y = element_text(angle = 0, size = 12, hjust = 0.5, vjust = 0.7)) + # adjust y axis for readability
+  theme(axis.title.x = element_text(angle = 0, size = 12)) +
+  theme(plot.title = element_text(hjust = 0.5))  # center title
+```
+
+The effect of the TN-PSA on the quantity of oxycodone prescriptions in Eastern Tennessee is very visible here. After it was enacted, oxycodone purchases began to decline, a turnaround from previous increases. 
+
+To further our analysis, we can calculate the regression slopes before the policy and after the policy was enacted to compare and quantify the differences. We can also calculate the immediate effect of the policy. 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+its <- lm(quantity ~ time + treatment + time_since, data = oxycodone_yearmonth)
+slope_before_policy <- coef(its)["time"]
+    # before the policy is enacted, the treatment and time variables are both 0, so the regression slope is driven 
+    # by the effect of time alone
+slope_after_policy <- coef(its)["time"] + coef(its)["time_since"]
+    # after the policy, the time and time_since variable are both nonzero, change over time, and thus affect the
+  # aka sustained effect
+    # the value of quantity
+immediate_effect <- coef(its)["treatment"]
+  # the slope of treatment gives the immediate effect of the policy; treatment provides a level shift since it is 
+  # 0 before the policy and 1 after. 
+
+# print results: using cat() so I can have line breaks
+cat("Slope before TN-PSA: ", slope_before_policy, "\n",   
+    "Slope after TN-PSA: ", slope_after_policy, "\n",
+    "Immediate effect of the policy: ", immediate_effect, "\n")
+```
+Note that the units here are quantity of oxycodone purchased in Eastern Tn in each month. Thus, we have the following interpretations: 
+
+  a. Before the TN-PSA, we would expect the quantity of oxycodone purchased by buyers Eastern Tennessee to increase by ~822 each month. 
+  b. After the TN-PSA of 2012 was passed, the quantity of oxycodone purchased decreased by ~36,270 the following month (immediate effect)
+  c. On top of that, we would expect the quantity purchased to decrease by ~-370 each month after the policy intervention (sustained effect). 
+
+These results point to the effectiveness of the TN-PSA of 2012. A next step for this interrupted time series analysis is to evaluate the error and bias of our model. An natural first thing to is plot the residuals. 
+
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+residuals <- its$residuals
+fitted_values <- its$fitted.values
+# plot manually
+plot(fitted_values, residuals, 
+     xlab = "Fitted values", ylab = "Residuals", 
+     main = "Residuals vs Fitted Values")
+```
+
+
+These residuals do not look randomly dispersed around 0. Thus, we will want to check some of the assumptions of linear regression. 
+
+Because we are working with time series data, autocorrelation is of concern. We can formally test for autocorrelation of residuals with the Durbin-Watson test. 
+```{r echo = TRUE, warning = FALSE, error = TRUE, message = FALSE}
+# Test for autocorrelation
+dwtest <- dwtest(its)
+print(dwtest)
+```
+With a large p-value of 0.6946, there is not significant evidence to say the residuals of our `its` model exhibit autocorrelation. Therefore, our interrupted time series model appears to meet the assumption of uncorrelated residuals, which is want we want for ordinary least squares regression models. This helps ensure the validity of our results and test statistics. 
+
+*However*, we can see from the graph of residuals vs fitted values that there may be some heteroscedasticity, since we can see the points "fanning out" as we move along the x-axis, meaning the variability of the residuals change over time and that there can be some inflation of standard errors. With that said, in the context of our analysis of policy impact, heteroscedasticity is not as much of a concern for us. This is because with analyzing the impact of policy, we care much more about accuracy than precision. That is, we want to capture the overall trend / impact of the policy, as opposed to computing precise estimates. 
+
+On the other hand, in the same context of policy impact analysis, autocorrelation is a much bigger concern. Its presence could mean the estimated effects produced by our model might be overstated. Thus, because we have shown no correlation of residuals, our results do a better job of capturing the overall impact of the TN-PSA, which is preferred for us. 
+
+Additionally, in our presentation, we will dig deeper into the interrupted time series for the TN-PSA of 2012. However, we did not perform this analysis in R. Instead, we used Tableau to create visuals.
+
+### Tableau Documentation
+We created data visualizations in Tableau so that we could effectively perform geospatial analysis and communicate our findings for the interrupted time series. We felt that these visualizations helped immensely with telling the story of our data and findings, and were much more convenient to create in Tableau. 
+
+For documentation purposes, some of our cleaning steps in Tableau included:
+
+  1. We used tableau extracts for manageability and performance. 
+  2. We created a connection (inner join) between the ARCOS data and county_demographics data (i.e., the Census and NIH data) along the `buyer_county` variable (ARCOS) and `County` variable (county_demographics)
+  3. Population density calculated field: [Population]/[Area (sq mile)]
+  4. Classification calculated field (This is for distinguishing between rural counties and urban counties):
+    a. IF[County] = "KNOX" OR [County] = "HAMILTON"
+    b. THEN "Urban"
+    c. ELSE "Rural"
+    d. END 
+  5. Adjusted quantity calculated field: SUM([Quantity]/SUM([POPULATION])): This is how we adjusted some fields to be on a per-capita basis. This is very important because between counties there can be large discrepancies in population, so using data adjusted per-capita ensures we are making accurate comparisons and not drawing ill-informed conclusions. 
+
+
+
