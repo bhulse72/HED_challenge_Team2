@@ -13,3 +13,5 @@ This repository contains the code used for the **HED Challenge** by Team 2. Our 
 ### Background
 > The HED Challenge aims to explore real-world health datasets, pursue novel research questions related to health equity, and create figures/dashboards to communicate key health data insights to a wide range of audiences. Our approach leverages Tableau visuals and analysis done in R to address the challenge objectives.
 
+<img width="1512" alt="image" src="https://github.com/user-attachments/assets/c3b00800-4a4c-4727-b04f-02bf475f8165">
+
